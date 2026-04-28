@@ -14,13 +14,34 @@ import psutil
 WINDSURF_BINARIES = ("windsurf", "Windsurf")
 
 
+def _is_windsurf_proc(info: dict) -> bool:
+    """Decide whether a psutil process info dict belongs to Windsurf.
+
+    Most Linux builds ship Windsurf as a generic ``electron`` binary
+    (e.g. ``/usr/lib/electron39/electron --app=/usr/share/windsurf/...``),
+    so neither ``name`` nor ``exe`` mentions Windsurf — only ``cmdline``
+    does. We match if any of name/exe/cmdline references a ``windsurf``
+    path component. The check is intentionally strict (``/windsurf``,
+    not bare ``windsurf``) to avoid matching unrelated tools whose argv
+    merely contain the literal string (e.g. ``wind-server`` itself, or
+    a python ``-c`` script that mentions the word).
+    """
+    name = (info.get("name") or "").lower()
+    exe = (info.get("exe") or "").lower()
+    if "windsurf" in name or "windsurf" in exe:
+        return True
+    for arg in info.get("cmdline") or ():
+        lowered = arg.lower()
+        if "/windsurf/" in lowered or lowered.endswith("/windsurf"):
+            return True
+    return False
+
+
 def find_windsurf_processes() -> list[psutil.Process]:
     procs = []
     for proc in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
         try:
-            name = (proc.info.get("name") or "").lower()
-            exe = (proc.info.get("exe") or "").lower()
-            if "windsurf" in name or "windsurf" in exe:
+            if _is_windsurf_proc(proc.info):
                 procs.append(proc)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
@@ -75,7 +96,10 @@ def stop(graceful_timeout: float = 8.0, hard_timeout: float = 5.0) -> bool:
             p.terminate()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-    psutil.wait_procs(procs, timeout=graceful_timeout)
+    try:
+        psutil.wait_procs(procs, timeout=graceful_timeout)
+    except OSError:
+        pass
 
     # Phase 2: SIGKILL anything still alive (re-scan in case Electron
     # respawned helpers or new children appeared between phase 1 and now).
@@ -85,7 +109,10 @@ def stop(graceful_timeout: float = 8.0, hard_timeout: float = 5.0) -> bool:
             p.kill()
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-    psutil.wait_procs(remaining, timeout=hard_timeout)
+    try:
+        psutil.wait_procs(remaining, timeout=hard_timeout)
+    except OSError:
+        pass
 
     # Phase 3: poll until is_running() is definitively False.
     deadline = time.monotonic() + 5.0
