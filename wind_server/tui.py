@@ -6,8 +6,8 @@ from datetime import datetime
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable, Footer, Header, Input, Static
+from textual.containers import Horizontal
+from textual.widgets import DataTable, Footer, Input, Static
 
 from . import profile as prof
 from . import ratelimit, vscdb, windsurf_proc
@@ -34,11 +34,86 @@ def _fmt(ts: float) -> str:
 
 class WindServerTUI(App):
     CSS = """
-    Screen { layout: vertical; }
-    #status { dock: top; height: 5; padding: 1 2; background: $boost; }
-    #table { height: 1fr; }
-    #help { dock: bottom; height: 1; }
-    Input { dock: bottom; }
+    Screen {
+        layout: vertical;
+        background: $surface;
+    }
+
+    #header {
+        dock: top;
+        height: 3;
+        background: $primary;
+        color: $text;
+        padding: 0 2;
+        border-bottom: solid $primary-darken-2;
+    }
+
+    #header-title {
+        width: 1fr;
+        content-align: left middle;
+    }
+
+    #header-clock {
+        width: auto;
+        content-align: right middle;
+        color: $text-muted;
+    }
+
+    #status {
+        dock: top;
+        height: 3;
+        padding: 0 2;
+        background: $surface;
+        color: $text;
+        border-bottom: solid $primary-darken-2;
+    }
+
+    #table {
+        height: 1fr;
+        background: $surface;
+    }
+
+    DataTable {
+        background: $surface;
+        border: none;
+    }
+
+    DataTable .datatable--header {
+        background: $primary-darken-1;
+        color: $text;
+        border-bottom: solid $primary-darken-2;
+    }
+
+    DataTable .datatable--header-row {
+        background: $primary-darken-1;
+    }
+
+    DataTable .datatable--row {
+        background: $surface;
+        color: $text;
+    }
+
+    DataTable .datatable--row-highlight {
+        background: $primary-darken-2;
+        color: $text;
+    }
+
+    DataTable .datatable--cursor-row {
+        background: $primary-darken-2;
+        color: $text;
+    }
+
+    Footer {
+        dock: bottom;
+        background: $primary-darken-1;
+        color: $text;
+        border-top: none;
+    }
+
+    Input {
+        dock: bottom;
+        margin: 0 2 1 2;
+    }
     """
     BINDINGS = [
         Binding("enter", "switch_selected", "Switch"),
@@ -59,14 +134,19 @@ class WindServerTUI(App):
         self._col_switched_key = None
 
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
+        now = datetime.now().strftime("%H:%M")
+        yield Horizontal(
+            Static("[b]Wind Server[/b]  [dim]Profile Manager[/dim]", id="header-title"),
+            Static(now, id="header-clock"),
+            id="header",
+        )
         yield Static("", id="status")
-        yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
+        yield DataTable(id="table", cursor_type="row", zebra_stripes=False)
         yield Footer()
 
     def on_mount(self) -> None:
         table = self.query_one("#table", DataTable)
-        keys = table.add_columns("active", "email", "account", "label", "daily used", "last active")
+        keys = table.add_columns("", "email", "account", "label", "daily used", "last active")
         # `add_columns` returns the list of ColumnKey objects in order.
         self._col_daily_key = keys[4]
         self._col_switched_key = keys[5]
@@ -90,10 +170,11 @@ class WindServerTUI(App):
             return f"{100 - rem}% [{rem}% rem]"
 
         warn = "  ⚠ LOW" if q.is_low else ""
+        status_color = "yellow" if q.is_low else "green"
         self.query_one("#status", Static).update(
-            f"[b]Active:[/b] {active}    [b]Email:[/b] {email}    [b]Windsurf:[/b] {running}    "
-            f"[b]Daily used:[/b] {_used(q.daily_remaining_pct)}    "
-            f"[b]Weekly used:[/b] {_used(q.weekly_remaining_pct)}{warn}"
+            f"  [b]Account[/b] {active}  │  [b]Email[/b] {email}  │  [b]Windsurf[/b] {running}  │  "
+            f"[b]Daily[/b] [{status_color}]{_used(q.daily_remaining_pct)}[/{status_color}]  │  "
+            f"[b]Weekly[/b] [{status_color}]{_used(q.weekly_remaining_pct)}[/{status_color}]{warn}"
         )
 
     def _refresh_table(self) -> None:
@@ -133,7 +214,7 @@ class WindServerTUI(App):
                 switched_cell = "—"
 
             table.add_row(
-                "★" if is_active else "",
+                "●" if is_active else "○",
                 _email_from_profile(p),
                 p.meta.account_name,
                 p.meta.label or "-",
@@ -152,6 +233,8 @@ class WindServerTUI(App):
         """
         try:
             self._refresh_status()
+            now = datetime.now().strftime("%H:%M")
+            self.query_one("#header-clock", Static).update(now)
         except Exception:
             return
         if self._col_daily_key is None:
@@ -170,10 +253,10 @@ class WindServerTUI(App):
         try:
             if live_daily is not None:
                 table.update_cell(match.meta.slug, self._col_daily_key, f"{100 - live_daily}%")
-            if self._col_switched_key and match.meta.last_active_at:
+            if self._col_switched_key:
                 table.update_cell(
                     match.meta.slug, self._col_switched_key,
-                    _fmt(match.meta.last_active_at),
+                    "active now",
                 )
         except Exception:
             # Row may have been removed mid-tick; full refresh will fix it.
