@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wind-server"
+version = "0.1.0"
+description = "Multi-account manager for Windsurf IDE: switch, swap, auto-fail-over on rate limit."
+requires-python = ">=3.10"
+dependencies = [
+    "click>=8.1",
+    "textual>=0.60",
+    "watchdog>=4.0",
+    "requests>=2.31",
+    "psutil>=5.9",
+]
+
+[project.scripts]
+wind-server = "wind_server.cli:main"
+ws = "wind_server.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["wind_server*"]
