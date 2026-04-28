@@ -86,6 +86,10 @@ def test_snapshot_and_restore_round_trip(env, monkeypatch) -> None:
     prof.apply_profile(prof.load_profile(alice.meta.slug))
     assert vscdb.get_active_account_name(env["db"]) == "Alice"
     assert vscdb.get_installation_id(env["db"]) == "install-A"
+    # apply_profile should not mutate last_active_at; that's only set when
+    # switching away via save_current_before_switch.
+    reloaded = prof.load_profile(alice.meta.slug)
+    assert reloaded.meta.last_active_at == 0.0
 
 
 def test_find_matching_profile(env) -> None:
@@ -115,45 +119,46 @@ def test_snapshot_skips_quota_when_cache_missing(env) -> None:
     assert "quota" not in (p.meta.extra or {})
 
 
-def test_inherit_persistent_meta_carries_last_switched(env) -> None:
+def test_inherit_persistent_meta_carries_last_active(env) -> None:
     # Simulate a profile that was switched into 1234 ago.
     alice = prof.snapshot_current(label="primary")
-    alice.meta.last_switched_at = 1_700_001_234.0
+    alice.meta.last_active_at = 1_700_001_234.0
     alice.save()
 
     # Daemon-style auto-save: fresh snapshot then inherit.
     fresh = prof.snapshot_current()
-    assert fresh.meta.last_switched_at == 0.0  # snapshot itself doesn't know
+    assert fresh.meta.last_active_at == 0.0  # snapshot itself doesn't know
     match = prof.find_matching_profile(fresh.meta.account_name, fresh.meta.installation_id)
     assert match is not None
     prof.inherit_persistent_meta(fresh, match)
     fresh.save()
 
     reloaded = prof.load_profile(alice.meta.slug)
-    assert reloaded.meta.last_switched_at == 1_700_001_234.0
+    assert reloaded.meta.last_active_at == 1_700_001_234.0
     assert reloaded.meta.label == "primary"
     assert reloaded.meta.created_at == alice.meta.created_at
 
 
-def test_save_current_before_switch_sets_last_switched_and_quota(env) -> None:
+def test_save_current_before_switch_captures_quota(env) -> None:
     # Rebuild DB with quota data so _merge_live_quota has something to read
     # (in tests the LSP is unavailable, so it falls back to cached plan info).
     env["db"].unlink()
     _build_db(env["db"], "Alice", "install-A",
               daily_remaining=42, weekly_remaining=75, daily_reset_at=1_700_000_000)
 
-    # First, save Alice as a profile (no last_switched_at yet).
+    # First, save Alice as a profile (no last_active_at yet).
     alice = prof.snapshot_current(label="primary")
     alice.save()
-    assert alice.meta.last_switched_at == 0.0
+    assert alice.meta.last_active_at == 0.0
 
     # Now simulate "save before switch".
     saved_slug = prof.save_current_before_switch()
     assert saved_slug is not None
 
-    # Reload and verify the from-account got a timestamp and quota.
+    # Reload and verify quota was captured (last_active_at is NOT set here —
+    # it is set when switching AWAY from a profile).
     reloaded = prof.load_profile(saved_slug)
-    assert reloaded.meta.last_switched_at > 0.0
+    assert reloaded.meta.last_active_at > 0.0
     quota = (reloaded.meta.extra or {}).get("quota") or {}
     assert quota.get("daily_remaining_pct") == 42
     assert quota.get("weekly_remaining_pct") == 75

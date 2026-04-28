@@ -25,7 +25,7 @@ def _email_from_profile(p: prof.Profile) -> str:
 
 
 def _fmt(ts: float) -> str:
-    return datetime.fromtimestamp(ts).strftime("%H:%M %m-%d") if ts else "—"
+    return datetime.fromtimestamp(ts).strftime("%I:%M %p %m-%d") if ts else "—"
 
 
 class WindServerTUI(App):
@@ -52,6 +52,7 @@ class WindServerTUI(App):
         self.editing_slug: str | None = None
         # Populated in on_mount; needed for in-place cell updates on auto-refresh.
         self._col_daily_key = None
+        self._col_switched_key = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -61,9 +62,10 @@ class WindServerTUI(App):
 
     def on_mount(self) -> None:
         table = self.query_one("#table", DataTable)
-        keys = table.add_columns("active", "email", "account", "label", "daily used", "last switched")
+        keys = table.add_columns("active", "email", "account", "label", "daily used", "last active")
         # `add_columns` returns the list of ColumnKey objects in order.
         self._col_daily_key = keys[4]
+        self._col_switched_key = keys[5]
         self.action_refresh()
         # Auto-refresh: only the live status bar + the active row's daily cell.
         # We deliberately do NOT rebuild the whole table on a timer — that
@@ -118,12 +120,10 @@ class WindServerTUI(App):
             else:
                 daily_cell = "—"
 
-            if p.meta.last_switched_at:
-                switched_cell = _fmt(p.meta.last_switched_at)
-            elif is_active:
-                # First-load case: this account was never switched *into* via
-                # wind-server (it was just `add`ed, or pre-dates wind-server).
-                switched_cell = "current"
+            if is_active:
+                switched_cell = "active now"
+            elif p.meta.last_active_at:
+                switched_cell = _fmt(p.meta.last_active_at)
             else:
                 switched_cell = "—"
 
@@ -157,15 +157,19 @@ class WindServerTUI(App):
             return
         live_q = ratelimit.read_quota()
         live_daily = live_q.daily_remaining_pct if live_q.source != "unknown" else None
-        if live_daily is None:
-            return
         # Find the matching profile slug to address its row.
         match = prof.find_matching_profile(active_name, active_install or "")
         if match is None:
             return
         table = self.query_one("#table", DataTable)
         try:
-            table.update_cell(match.meta.slug, self._col_daily_key, f"{100 - live_daily}%")
+            if live_daily is not None:
+                table.update_cell(match.meta.slug, self._col_daily_key, f"{100 - live_daily}%")
+            if self._col_switched_key and match.meta.last_active_at:
+                table.update_cell(
+                    match.meta.slug, self._col_switched_key,
+                    _fmt(match.meta.last_active_at),
+                )
         except Exception:
             # Row may have been removed mid-tick; full refresh will fix it.
             pass
@@ -193,7 +197,7 @@ class WindServerTUI(App):
         except FileNotFoundError:
             self.notify(f"Profile {slug!r} not found", severity="error")
             return
-        # Auto-save current first (sets last_switched_at + live quota)
+        # Auto-save current first (captures live quota)
         prof.save_current_before_switch()
         if windsurf_proc.is_running():
             self.notify("Stopping Windsurf...", timeout=2)

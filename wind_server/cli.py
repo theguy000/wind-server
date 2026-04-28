@@ -16,7 +16,7 @@ from .paths import ensure_dirs
 def _fmt_ts(ts: float) -> str:
     if not ts:
         return "—"
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %I:%M %p")
 
 
 @click.group(help="Multi-account manager for Windsurf IDE.")
@@ -31,7 +31,7 @@ def cmd_list() -> None:
     profiles = prof.list_profiles()
     if not profiles:
         click.echo("No saved profiles. Run `wind-server add` to capture the current account.")
-    click.echo(f"{'Active':6} {'Slug':20} {'Account':28} {'Label':14} {'Last switched':16}")
+    click.echo(f"{'Active':6} {'Slug':20} {'Account':28} {'Label':14} {'Last active':20}")
     click.echo("-" * 92)
     seen_active = False
     for p in profiles:
@@ -43,8 +43,8 @@ def cmd_list() -> None:
             seen_active = True
         marker = "  *  " if is_active else "     "
         switched = (
-            _fmt_ts(p.meta.last_switched_at) if p.meta.last_switched_at
-            else "current" if is_active
+            "active now" if is_active
+            else _fmt_ts(p.meta.last_active_at) if p.meta.last_active_at
             else "—"
         )
         click.echo(
@@ -86,7 +86,7 @@ def cmd_save(slug: str | None) -> None:
             slug = fresh.meta.slug
             click.echo(f"No matching profile found; creating new one: {slug}")
     fresh.meta.slug = slug
-    # Preserve persistent meta (created_at, label, last_switched_at) if the
+    # Preserve persistent meta (created_at, label, last_active_at) if the
     # profile already exists.
     target_dir = paths.PROFILES_DIR / slug
     if (target_dir / "meta.json").exists():

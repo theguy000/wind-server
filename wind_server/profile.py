@@ -37,7 +37,7 @@ class ProfileMeta:
     session_jwt_preview: str = ""   # first 24 chars, for display
     created_at: float = 0.0
     updated_at: float = 0.0
-    last_switched_at: float = 0.0
+    last_active_at: float = 0.0
     extra: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
@@ -53,7 +53,7 @@ class ProfileMeta:
             session_jwt_preview=d.get("session_jwt_preview", ""),
             created_at=d.get("created_at", 0.0),
             updated_at=d.get("updated_at", 0.0),
-            last_switched_at=d.get("last_switched_at", 0.0),
+            last_active_at=d.get("last_active_at", d.get("last_switched_at", 0.0)),
             extra=d.get("extra") or {},
         )
 
@@ -170,12 +170,12 @@ def inherit_persistent_meta(fresh: "Profile", match: "Profile") -> None:
     the user-supplied label was, when the profile was first created, or when
     we last switched into it. When auto-saving (daemon, `cli save`, TUI
     save / pre-switch save) we must carry those forward, otherwise every
-    auto-save zeroes `last_switched_at`.
+    auto-save zeroes `last_active_at`.
     """
     fresh.meta.slug = match.meta.slug
     fresh.meta.created_at = match.meta.created_at or fresh.meta.created_at
     fresh.meta.label = match.meta.label or fresh.meta.label
-    fresh.meta.last_switched_at = match.meta.last_switched_at
+    fresh.meta.last_active_at = match.meta.last_active_at
 
 
 def find_matching_profile(account_name: str, installation_id: str) -> Profile | None:
@@ -220,8 +220,8 @@ def _merge_live_quota(profile: Profile) -> None:
 def save_current_before_switch() -> str | None:
     """Auto-save the currently active account before switching away.
 
-    Sets ``last_switched_at`` to now and merges live quota into
-    ``extra.quota`` so the TUI can display usage for inactive profiles.
+    Merges live quota into ``extra.quota`` so the TUI can display usage
+    for inactive profiles.
 
     Returns the slug of the saved profile, or *None* if the current
     account has no matching saved profile (nothing to update).
@@ -234,8 +234,8 @@ def save_current_before_switch() -> str | None:
     if not match:
         return None
     inherit_persistent_meta(current, match)
-    # Record when we switched away from this account
-    current.meta.last_switched_at = time.time()
+    # Record when this account was last active (we are switching away from it now).
+    current.meta.last_active_at = time.time()
     # Merge live quota so it's visible when this profile is inactive
     _merge_live_quota(current)
     current.save()
@@ -252,5 +252,4 @@ def apply_profile(profile: Profile) -> None:
     vscdb.clear_cached_plan_info()
     if profile.identity:
         storage_json.write_identity(profile.identity)
-    profile.meta.last_switched_at = time.time()
     profile.save()
