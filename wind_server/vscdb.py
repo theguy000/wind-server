@@ -154,6 +154,26 @@ def get_installation_id(db_path: Path | None = None) -> str | None:
     return data.get("codeium.installationId")
 
 
+def get_active_email(db_path: Path | None = None) -> str | None:
+    """Return the email address of the currently logged in account, or None."""
+    try:
+        with _connect(db_path) as conn:
+            row = conn.execute(
+                "SELECT value FROM ItemTable WHERE key = 'codeium.windsurf'"
+            ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row or not row[0]:
+        return None
+    try:
+        data = json.loads(row[0])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data.get("lastLoginEmail")
+
+
 def write_auth_rows(rows: dict[str, str], db_path: Path | None = None) -> None:
     """Atomically replace every auth row with the given mapping.
 

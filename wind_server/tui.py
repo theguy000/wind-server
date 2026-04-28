@@ -13,6 +13,10 @@ from . import profile as prof
 from . import ratelimit, vscdb, windsurf_proc
 
 
+def _active_email() -> str:
+    return vscdb.get_active_email() or "—"
+
+
 def _email_from_profile(p: prof.Profile) -> str:
     val = p.auth_rows.get("codeium.windsurf", "")
     if not val:
@@ -76,6 +80,7 @@ class WindServerTUI(App):
 
     def _refresh_status(self) -> None:
         active = vscdb.get_active_account_name() or "(none)"
+        email = _active_email()
         running = "running" if windsurf_proc.is_running() else "stopped"
         q = ratelimit.read_quota()
 
@@ -86,7 +91,7 @@ class WindServerTUI(App):
 
         warn = "  ⚠ LOW" if q.is_low else ""
         self.query_one("#status", Static).update(
-            f"[b]Active:[/b] {active}    [b]Windsurf:[/b] {running}    "
+            f"[b]Active:[/b] {active}    [b]Email:[/b] {email}    [b]Windsurf:[/b] {running}    "
             f"[b]Daily used:[/b] {_used(q.daily_remaining_pct)}    "
             f"[b]Weekly used:[/b] {_used(q.weekly_remaining_pct)}{warn}"
         )
