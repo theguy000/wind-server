@@ -17,6 +17,16 @@ need to swap the SQLite rows.
 ## Install
 
 ```bash
+chmod +x setup.sh
+./setup.sh
+```
+
+The setup script installs `wind-server`, inserts a managed block into
+`~/.bashrc`, and enables the user `systemd` auto-save daemon when available.
+
+Manual install:
+
+```bash
 pipx install /home/istiak/git/wind-server
 # or for development:
 pip install -e /home/istiak/git/wind-server

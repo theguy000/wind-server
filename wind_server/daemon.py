@@ -19,7 +19,10 @@ from watchdog.observers import Observer
 
 from . import profile as prof
 from . import vscdb
+from .log import get as get_logger
 from .paths import DAEMON_PID, GLOBAL_STORAGE, STATE_VSCDB, ensure_dirs
+
+log = get_logger("daemon")
 
 
 def _is_daemon_running() -> bool:
@@ -52,7 +55,7 @@ def _acquire_daemon_lock() -> bool:
 
 
 def _log(msg: str) -> None:
-    print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+    log.info(msg)
 
 
 class _Handler(FileSystemEventHandler):
@@ -61,7 +64,7 @@ class _Handler(FileSystemEventHandler):
         self.last_install: str | None = None
         self._cooldown_until = 0.0
 
-    def _maybe_save(self) -> None:
+    def maybe_save(self) -> None:
         # Throttle: at most once every 3 seconds.
         now = time.time()
         if now < self._cooldown_until:
@@ -97,13 +100,15 @@ class _Handler(FileSystemEventHandler):
     def on_modified(self, event: FileSystemEvent) -> None:
         # Match exact basename to avoid triggering on journal/wal/backup files
         if not event.is_directory and os.path.basename(event.src_path) == "state.vscdb":
-            self._maybe_save()
+            self.maybe_save()
 
     def on_created(self, event: FileSystemEvent) -> None:
         self.on_modified(event)
 
 
 def run_daemon() -> None:
+    from .log import setup
+    setup()
     ensure_dirs()
     if not _acquire_daemon_lock():
         _log("daemon already running; exiting")
@@ -133,7 +138,7 @@ def run_daemon() -> None:
         while not stop_requested:
             time.sleep(2.0)
             # Periodic re-check in case watchdog missed an event.
-            handler._maybe_save()
+            handler.maybe_save()
     except KeyboardInterrupt:
         pass
     finally:

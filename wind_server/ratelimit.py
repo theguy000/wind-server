@@ -31,11 +31,7 @@ import requests
 from . import lsp_client, vscdb
 from .paths import WINDSURF_LOG_ROOT
 
-# State for scan_recent_logs to track position and cooldown
-_last_log_path: Path | None = None
-_last_log_pos: int = 0
-_last_rate_limit_hit: float = 0.0
-_SWITCH_COOLDOWN_SECONDS: float = 300.0  # 5 minutes between switches
+SWITCH_COOLDOWN_SECONDS: float = 300.0  # 5 minutes between switches
 
 USER_STATUS_URL = (
     "https://server.self-serve.windsurf.com/"
@@ -86,19 +82,33 @@ def read_quota(
 
     Set ``prefer_live=False`` to skip the LSP probe (useful in tests or
     when polling at high frequency — the LSP call is ~10–20 ms).
+
+    Note: When LSP returns None for daily/weekly, it means quota is exhausted
+    (0% remaining), not unknown. We treat missing daily as 0 to trigger auto-switch.
     """
     if prefer_live:
         status = lsp_client.get_user_status()
         if status is not None:
             daily, weekly = lsp_client.extract_quota_percents(status)
+            # LSP returns None when quota is exhausted, treat as 0% remaining
             if daily is not None or weekly is not None:
+                # If daily is None but we got a response, daily is exhausted (0%)
+                effective_daily = daily if daily is not None else 0
                 return QuotaSnapshot(
-                    daily_remaining_pct=daily,
+                    daily_remaining_pct=effective_daily,
                     weekly_remaining_pct=weekly,
                     raw_status_code=200,
                     rate_limited=False,
                     source="lsp_live",
                 )
+            # Both None means exhausted - daily is definitely 0
+            return QuotaSnapshot(
+                daily_remaining_pct=0,  # Exhausted
+                weekly_remaining_pct=weekly,
+                raw_status_code=200,
+                rate_limited=False,
+                source="lsp_live",
+            )
     return _from_cached_plan_info(db_path)
 
 
@@ -162,62 +172,74 @@ _LOG_TRIGGERS = re.compile(
 )
 
 
-def _newest_log_file() -> Path | None:
-    if not WINDSURF_LOG_ROOT.exists():
-        return None
-    candidates = list(WINDSURF_LOG_ROOT.rglob("*.log"))
-    if not candidates:
-        return None
-    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return candidates[0]
-
-
-def scan_recent_logs(byte_window: int = 65536) -> bool:
-    """Return True if the newest Windsurf log shows a recent rate-limit hit.
+class LogTracker:
+    """Encapsulates stateful log-tail scanning for rate-limit signals.
 
     Tracks file position between calls to avoid re-reporting the same 429
     multiple times. Also implements a cooldown period to prevent rapid
     successive switches.
     """
-    global _last_log_path, _last_log_pos, _last_rate_limit_hit
 
-    path = _newest_log_file()
-    if not path:
-        _last_log_path = None
-        _last_log_pos = 0
+    def __init__(self, cooldown: float = SWITCH_COOLDOWN_SECONDS) -> None:
+        self._last_log_path: Path | None = None
+        self._last_log_pos: int = 0
+        self._last_rate_limit_hit: float = 0.0
+        self._cooldown = cooldown
+
+    @staticmethod
+    def _newest_log_file() -> Path | None:
+        if not WINDSURF_LOG_ROOT.exists():
+            return None
+        candidates = list(WINDSURF_LOG_ROOT.rglob("*.log"))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return candidates[0]
+
+    def scan_recent_logs(self, byte_window: int = 65536) -> bool:
+        """Return True if the newest Windsurf log shows a recent rate-limit hit."""
+        path = self._newest_log_file()
+        if not path:
+            self._last_log_path = None
+            self._last_log_pos = 0
+            return False
+
+        # Reset position if log file changed (new session started)
+        if path != self._last_log_path:
+            self._last_log_path = path
+            self._last_log_pos = 0
+
+        try:
+            size = path.stat().st_size
+            # If file shrunk (rotated/truncated), reset position
+            if size < self._last_log_pos:
+                self._last_log_pos = 0
+
+            with path.open("rb") as f:
+                f.seek(self._last_log_pos)
+                new_content = f.read()
+                self._last_log_pos = f.tell()
+        except OSError:
+            return False
+
+        if not new_content:
+            return False
+
+        tail = new_content.decode("utf-8", errors="ignore")
+        if _LOG_TRIGGERS.search(tail):
+            now = time.time()
+            # Only report if cooldown has passed
+            if now - self._last_rate_limit_hit >= self._cooldown:
+                self._last_rate_limit_hit = now
+                return True
         return False
 
-    # Reset position if log file changed (new session started)
-    if path != _last_log_path:
-        _last_log_path = path
-        _last_log_pos = 0
-
-    try:
-        size = path.stat().st_size
-        # If file shrunk (rotated/truncated), reset position
-        if size < _last_log_pos:
-            _last_log_pos = 0
-
-        with path.open("rb") as f:
-            f.seek(_last_log_pos)
-            new_content = f.read()
-            _last_log_pos = f.tell()
-    except OSError:
-        return False
-
-    if not new_content:
-        return False
-
-    tail = new_content.decode("utf-8", errors="ignore")
-    if _LOG_TRIGGERS.search(tail):
-        now = time.time()
-        # Only report if cooldown has passed
-        if now - _last_rate_limit_hit >= _SWITCH_COOLDOWN_SECONDS:
-            _last_rate_limit_hit = now
-            return True
-    return False
+    def is_switch_cooldown_active(self) -> bool:
+        """Return True if a recent switch has occurred and cooldown is active."""
+        return time.time() - self._last_rate_limit_hit < self._cooldown
 
 
-def is_switch_cooldown_active() -> bool:
-    """Return True if a recent switch has occurred and cooldown is active."""
-    return time.time() - _last_rate_limit_hit < _SWITCH_COOLDOWN_SECONDS
+# Module-level default instance for backward compatibility.
+_default_tracker = LogTracker()
+scan_recent_logs = _default_tracker.scan_recent_logs
+is_switch_cooldown_active = _default_tracker.is_switch_cooldown_active

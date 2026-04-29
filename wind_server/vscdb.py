@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Iterable
 
 from . import paths
+from .log import get as get_logger
+
+log = get_logger("vscdb")
 
 # Keys that together uniquely identify the active account.
 # Anything matching these patterns is part of a profile snapshot.
@@ -191,6 +194,7 @@ def write_auth_rows(rows: dict[str, str], db_path: Path | None = None) -> None:
     # Local backup with timestamp (separate from Windsurf's own .backup).
     backup = db_path.with_suffix(db_path.suffix + f".wind-server.{int(time.time())}.bak")
     shutil.copy2(db_path, backup)
+    log.debug("backed up %s -> %s", db_path.name, backup.name)
     paths.prune_old_backups(db_path.parent, db_path.name)
 
     with _connect(db_path) as conn:
@@ -211,6 +215,7 @@ def write_auth_rows(rows: dict[str, str], db_path: Path | None = None) -> None:
         except Exception:
             conn.execute("ROLLBACK")
             # Restore from our local backup just in case the partial write corrupted things.
+            log.error("write_auth_rows failed, restoring from backup")
             shutil.copy2(backup, db_path)
             raise
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 
 from textual.app import App, ComposeResult
@@ -18,14 +19,8 @@ def _active_email() -> str:
 
 
 def _email_from_profile(p: prof.Profile) -> str:
-    val = p.auth_rows.get("codeium.windsurf", "")
-    if not val:
-        return "—"
-    try:
-        data = json.loads(val)
-    except json.JSONDecodeError:
-        return "—"
-    return data.get("lastLoginEmail") or "—"
+    email = prof.email_from_profile(p)
+    return email or "—"
 
 
 def _fmt(ts: float) -> str:
@@ -78,27 +73,17 @@ class WindServerTUI(App):
         border: none;
     }
 
-    DataTable .datatable--header {
+    DataTable > .datatable--header {
         background: $primary-darken-1;
         color: $text;
-        border-bottom: solid $primary-darken-2;
     }
 
-    DataTable .datatable--header-row {
-        background: $primary-darken-1;
-    }
-
-    DataTable .datatable--row {
-        background: $surface;
-        color: $text;
-    }
-
-    DataTable .datatable--row-highlight {
+    DataTable > .datatable--hover {
         background: $primary-darken-2;
         color: $text;
     }
 
-    DataTable .datatable--cursor-row {
+    DataTable > .datatable--cursor {
         background: $primary-darken-2;
         color: $text;
     }
@@ -155,6 +140,16 @@ class WindServerTUI(App):
         # We deliberately do NOT rebuild the whole table on a timer — that
         # would reset cursor position mid-navigation.
         self.set_interval(self.AUTO_REFRESH_INTERVAL, self._tick)
+        # Tick the header clock once a second so HH:MM stays accurate at
+        # the minute boundary without piggy-backing on the slower refresh.
+        self.set_interval(1.0, self._update_clock)
+
+    def _update_clock(self) -> None:
+        now = datetime.now().strftime("%H:%M")
+        try:
+            self.query_one("#header-clock", Static).update(now)
+        except Exception:
+            pass
 
     # --- helpers ---------------------------------------------------------
 
@@ -197,10 +192,14 @@ class WindServerTUI(App):
                 stale = False
             else:
                 daily_rem = stashed.get("daily_remaining_pct")
-                # Mark as stale if the cache predates the most recent daily reset.
-                reset = stashed.get("daily_reset_at") or 0
-                captured = stashed.get("captured_at") or 0
-                stale = bool(reset and captured and captured < reset)
+                # If the daily reset time has already passed, the captured
+                # percentage is no longer valid — treat it as unknown.
+                reset_at = stashed.get("daily_reset_at") or 0
+                captured_at = stashed.get("captured_at") or 0
+                if reset_at and time.time() >= reset_at:
+                    daily_rem = 100
+                else:
+                    stale = bool(reset_at and captured_at and captured_at < reset_at)
             if isinstance(daily_rem, int):
                 daily_cell = f"{100 - daily_rem}%{'?' if stale else ''}"
             else:
@@ -233,8 +232,7 @@ class WindServerTUI(App):
         """
         try:
             self._refresh_status()
-            now = datetime.now().strftime("%H:%M")
-            self.query_one("#header-clock", Static).update(now)
+            self._update_clock()
         except Exception:
             return
         if self._col_daily_key is None:
@@ -245,19 +243,15 @@ class WindServerTUI(App):
             return
         live_q = ratelimit.read_quota()
         live_daily = live_q.daily_remaining_pct if live_q.source != "unknown" else None
+        if live_daily is None:
+            return
         # Find the matching profile slug to address its row.
         match = prof.find_matching_profile(active_name, active_install or "")
         if match is None:
             return
         table = self.query_one("#table", DataTable)
         try:
-            if live_daily is not None:
-                table.update_cell(match.meta.slug, self._col_daily_key, f"{100 - live_daily}%")
-            if self._col_switched_key:
-                table.update_cell(
-                    match.meta.slug, self._col_switched_key,
-                    "active now",
-                )
+            table.update_cell(match.meta.slug, self._col_daily_key, f"{100 - live_daily}%")
         except Exception:
             # Row may have been removed mid-tick; full refresh will fix it.
             pass
@@ -309,7 +303,7 @@ class WindServerTUI(App):
     def action_save_current(self) -> None:
         try:
             current = prof.snapshot_current()
-            match = prof.find_matching_profile(current.meta.account_name, current.meta.installation_id)
+            match = prof.find_matching_profile(current.meta.account_name, current.meta.installation_id, prof.email_from_profile(current))
             if match:
                 prof.inherit_persistent_meta(current, match)
                 current.save()

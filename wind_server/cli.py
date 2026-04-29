@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 from datetime import datetime
@@ -10,7 +11,11 @@ import click
 
 from . import paths, profile as prof
 from . import ratelimit, vscdb, windsurf_proc
+from .log import get as get_logger
 from .paths import ensure_dirs
+from . import settings as _settings
+
+log = get_logger("cli")
 
 
 def _fmt_ts(ts: float) -> str:
@@ -20,7 +25,10 @@ def _fmt_ts(ts: float) -> str:
 
 
 @click.group(help="Multi-account manager for Windsurf IDE.")
-def main() -> None:
+@click.option("-v", "--verbose", is_flag=True, help="Enable debug logging.")
+def main(verbose: bool) -> None:
+    from .log import setup
+    setup(verbose=verbose)
     ensure_dirs()
 
 
@@ -107,6 +115,7 @@ def cmd_switch(slug: str, no_restart: bool, workspace: str | None) -> None:
     try:
         target = prof.load_profile(slug)
     except FileNotFoundError:
+        log.error("Profile not found: %s", slug)
         click.echo(f"Profile '{slug}' not found.", err=True)
         sys.exit(1)
 
@@ -118,10 +127,12 @@ def cmd_switch(slug: str, no_restart: bool, workspace: str | None) -> None:
     if windsurf_proc.is_running():
         click.echo("Stopping Windsurf...")
         if not windsurf_proc.stop():
+            log.error("Failed to stop Windsurf cleanly")
             click.echo("Failed to stop Windsurf cleanly.", err=True)
             sys.exit(2)
     # Wait until SQLite confirms the DB lock has been released.
     if not windsurf_proc.wait_until_db_unlocked():
+        log.error("DB still locked after Windsurf exit")
         click.echo("DB still locked after Windsurf exit.", err=True)
         sys.exit(2)
 
@@ -180,11 +191,15 @@ def cmd_status(as_json: bool) -> None:
 
 
 @main.command("auto", help="Run the rate-limit watchdog: auto-switch profiles when quota runs out.")
-@click.option("--interval", default=60, type=int, help="Polling interval (seconds).")
-@click.option("--threshold", default=ratelimit.DEFAULT_THRESHOLD_PCT, type=int,
+@click.option("--interval", default=None, type=int, help="Polling interval (seconds).")
+@click.option("--threshold", default=None, type=int,
               help="Daily remaining %% under which to switch.")
 @click.option("--workspace", default=None, help="Workspace to reopen on relaunch.")
-def cmd_auto(interval: int, threshold: int, workspace: str | None) -> None:
+def cmd_auto(interval: int | None, threshold: int | None, workspace: str | None) -> None:
+    s = _settings.load()
+    interval = interval if interval is not None else s.get("auto_interval_seconds", 60)
+    threshold = threshold if threshold is not None else s.get("auto_threshold_pct", ratelimit.DEFAULT_THRESHOLD_PCT)
+    workspace = workspace or s.get("default_workspace")
     click.echo(f"wind-server watchdog: interval={interval}s threshold={threshold}%")
     while True:
         try:
@@ -213,6 +228,7 @@ def cmd_auto(interval: int, threshold: int, workspace: str | None) -> None:
             click.echo("stopped")
             return
         except Exception as e:
+            log.warning("watchdog error: %s", e)
             click.echo(f"[{datetime.now():%H:%M:%S}] watchdog error: {e}")
             time.sleep(interval)
 
@@ -263,6 +279,51 @@ def cmd_ui() -> None:
 def cmd_daemon() -> None:
     from .daemon import run_daemon  # lazy import
     run_daemon()
+
+
+@main.group("settings", help="View or change persistent settings.")
+def cmd_settings() -> None:
+    pass
+
+
+@cmd_settings.command("list", help="Show all settings and their current values.")
+def cmd_settings_list() -> None:
+    all_settings = _settings.list_all()
+    defaults = _settings.DEFAULTS
+    for key in sorted(all_settings):
+        val = all_settings[key]
+        is_default = key not in defaults or val == defaults.get(key)
+        marker = "" if is_default else " *"
+        click.echo(f"  {key:30} {val!r}{marker}")
+    click.echo()
+    click.echo("  * = overridden from default")
+
+
+@cmd_settings.command("get", help="Print the value of a single setting.")
+@click.argument("key")
+def cmd_settings_get(key: str) -> None:
+    val = _settings.get(key)
+    if val is None:
+        click.echo(f"{key}: (not set)")
+    else:
+        click.echo(f"{key}: {val!r}")
+
+
+@cmd_settings.command("set", help="Set a setting value. Persisted to ~/.config/wind-server/settings.json.")
+@click.argument("key")
+@click.argument("value")
+def cmd_settings_set(key: str, value: str) -> None:
+    _settings.set(key, value)
+    click.echo(f"Set {key} = {value!r}")
+
+
+@cmd_settings.command("unset", help="Remove a setting override (reverts to default).")
+@click.argument("key")
+def cmd_settings_unset(key: str) -> None:
+    if _settings.unset(key):
+        click.echo(f"Unset {key}")
+    else:
+        click.echo(f"{key} was not overridden")
 
 
 if __name__ == "__main__":

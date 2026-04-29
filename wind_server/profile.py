@@ -105,12 +105,33 @@ def list_profiles() -> list[Profile]:
 
 
 def _capture_quota_extra() -> dict:
-    """Read the cached plan info row and return a small {daily,weekly,captured_at}
+    """Read quota info and return a small {daily,weekly,captured_at}
     dict suitable for stashing into ProfileMeta.extra["quota"].
 
-    Returns an empty dict if the row is missing or doesn't expose quotaUsage
-    (paid/enterprise plans without daily/weekly caps).
+    Prefers the live LSP RPC (fresh numbers) and falls back to the stale
+    cached plan info row when the LSP is unavailable (Windsurf not running).
+
+    When the LSP returns None for daily/weekly, it means quota is exhausted
+    (0% remaining) — we record 0 so the TUI shows "100%" instead of "—".
     """
+    from . import ratelimit
+
+    q = ratelimit.read_quota()
+    if q.source != "unknown":
+        out: dict = {"captured_at": time.time(), "source": q.source}
+        out["daily_remaining_pct"] = q.daily_remaining_pct if q.daily_remaining_pct is not None else 0
+        if q.weekly_remaining_pct is not None:
+            out["weekly_remaining_pct"] = q.weekly_remaining_pct
+        # Refresh reset time from cached plan info when available
+        info = vscdb.read_cached_plan_info()
+        if info:
+            qu = info.get("quotaUsage") or {}
+            reset = qu.get("dailyResetAtUnix")
+            if isinstance(reset, (int, float)):
+                out["daily_reset_at"] = int(reset)
+        return out
+
+    # Fallback: stale cached plan info (LSP unavailable)
     info = vscdb.read_cached_plan_info()
     if not info:
         return {}
@@ -119,7 +140,7 @@ def _capture_quota_extra() -> dict:
     weekly = qu.get("weeklyRemainingPercent")
     if daily is None and weekly is None:
         return {}
-    out: dict = {"captured_at": time.time()}
+    out = {"captured_at": time.time(), "source": "cached_plan_info"}
     if isinstance(daily, (int, float)):
         out["daily_remaining_pct"] = int(daily)
     if isinstance(weekly, (int, float)):
@@ -178,12 +199,25 @@ def inherit_persistent_meta(fresh: "Profile", match: "Profile") -> None:
     fresh.meta.last_active_at = match.meta.last_active_at
 
 
-def find_matching_profile(account_name: str, installation_id: str) -> Profile | None:
+def email_from_profile(p: Profile) -> str:
+    val = p.auth_rows.get("codeium.windsurf", "")
+    if not val:
+        return ""
+    try:
+        data = json.loads(val)
+    except json.JSONDecodeError:
+        return ""
+    return data.get("lastLoginEmail") or ""
+
+
+def find_matching_profile(account_name: str, installation_id: str, email: str = "") -> Profile | None:
     """Locate an existing profile that matches the given identity."""
     for p in list_profiles():
         if p.meta.account_name == account_name and (
             not installation_id or p.meta.installation_id == installation_id
         ):
+            if email and _email_from_profile(p) != email:
+                continue
             return p
     return None
 
@@ -230,7 +264,7 @@ def save_current_before_switch() -> str | None:
         current = snapshot_current()
     except RuntimeError:
         return None
-    match = find_matching_profile(current.meta.account_name, current.meta.installation_id)
+    match = find_matching_profile(current.meta.account_name, current.meta.installation_id, email_from_profile(current))
     if not match:
         return None
     inherit_persistent_meta(current, match)
