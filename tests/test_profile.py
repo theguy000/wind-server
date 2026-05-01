@@ -16,6 +16,7 @@ def _build_db(
     account: str,
     install_id: str,
     *,
+    email: str = "",
     daily_remaining: int | None = None,
     weekly_remaining: int | None = None,
     daily_reset_at: int | None = None,
@@ -24,7 +25,7 @@ def _build_db(
     conn.execute("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB)")
     rows = [
         ("windsurfAuthStatus", json.dumps({"apiKey": f"devin-session-token$jwt-{account}"})),
-        ("codeium.windsurf", json.dumps({"codeium.installationId": install_id})),
+        ("codeium.windsurf", json.dumps({"codeium.installationId": install_id, "lastLoginEmail": email})),
         ("codeium.windsurf-windsurf_auth", account),
         (f"windsurf_auth-{account}", "[]"),
         ("theme", "vs-dark"),  # untouched
@@ -59,7 +60,7 @@ def env(tmp_path: Path, monkeypatch) -> dict:
         "telemetry.sqmId": "",
         "theme": "vs-dark",
     }))
-    _build_db(db, "Alice", "install-A")
+    _build_db(db, "Alice", "install-A", email="alice@example.com")
 
     from wind_server import paths as wpaths
     monkeypatch.setattr(wpaths, "STATE_VSCDB", db)
@@ -77,7 +78,7 @@ def test_snapshot_and_restore_round_trip(env, monkeypatch) -> None:
 
     # Switch DB to Bob
     env["db"].unlink()
-    _build_db(env["db"], "Bob", "install-B")
+    _build_db(env["db"], "Bob", "install-B", email="bob@example.com")
 
     # Sanity: active is now Bob
     assert vscdb.get_active_account_name(env["db"]) == "Bob"
@@ -95,15 +96,29 @@ def test_snapshot_and_restore_round_trip(env, monkeypatch) -> None:
 def test_find_matching_profile(env) -> None:
     alice = prof.snapshot_current()
     alice.save()
-    found = prof.find_matching_profile("Alice", "install-A")
+    found = prof.find_matching_profile("alice@example.com")
     assert found is not None and found.meta.slug == alice.meta.slug
-    assert prof.find_matching_profile("Nobody", "") is None
+    assert prof.find_matching_profile("nobody@example.com") is None
+
+
+def test_find_matching_profile_fallback_on_account_name(env) -> None:
+    """When email is empty, find_matching_profile falls back to account_name."""
+    alice = prof.snapshot_current()
+    # Simulate a profile with no email (e.g. older Windsurf version)
+    alice.auth_rows["codeium.windsurf"] = json.dumps(
+        {"codeium.installationId": alice.meta.installation_id}
+    )
+    alice.save()
+    # Email-based match should fail, account_name fallback should work
+    assert prof.find_matching_profile("") is None
+    found = prof.find_matching_profile("", "Alice")
+    assert found is not None and found.meta.slug == alice.meta.slug
 
 
 def test_snapshot_captures_quota_into_extra(env) -> None:
     # Rebuild Alice's DB with cached plan info present.
     env["db"].unlink()
-    _build_db(env["db"], "Alice", "install-A",
+    _build_db(env["db"], "Alice", "install-A", email="alice@example.com",
               daily_remaining=68, weekly_remaining=82, daily_reset_at=1_700_000_000)
     p = prof.snapshot_current()
     quota = (p.meta.extra or {}).get("quota") or {}
@@ -128,7 +143,8 @@ def test_inherit_persistent_meta_carries_last_active(env) -> None:
     # Daemon-style auto-save: fresh snapshot then inherit.
     fresh = prof.snapshot_current()
     assert fresh.meta.last_active_at == 0.0  # snapshot itself doesn't know
-    match = prof.find_matching_profile(fresh.meta.account_name, fresh.meta.installation_id)
+    email = prof.email_from_profile(fresh)
+    match = prof.find_matching_profile(email, fresh.meta.account_name)
     assert match is not None
     prof.inherit_persistent_meta(fresh, match)
     fresh.save()
@@ -143,7 +159,7 @@ def test_save_current_before_switch_captures_quota(env) -> None:
     # Rebuild DB with quota data so _merge_live_quota has something to read
     # (in tests the LSP is unavailable, so it falls back to cached plan info).
     env["db"].unlink()
-    _build_db(env["db"], "Alice", "install-A",
+    _build_db(env["db"], "Alice", "install-A", email="alice@example.com",
               daily_remaining=42, weekly_remaining=75, daily_reset_at=1_700_000_000)
 
     # First, save Alice as a profile (no last_active_at yet).

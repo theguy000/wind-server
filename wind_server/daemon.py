@@ -86,7 +86,8 @@ class _Handler(FileSystemEventHandler):
         self._cooldown_until = now + 3.0
         try:
             current = prof.snapshot_current()
-            match = prof.find_matching_profile(account, install or "")
+            email = prof.email_from_profile(current)
+            match = prof.find_matching_profile(email, current.meta.account_name)
             if match:
                 prof.inherit_persistent_meta(current, match)
                 current.save()

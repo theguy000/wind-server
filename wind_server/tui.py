@@ -175,16 +175,15 @@ class WindServerTUI(App):
     def _refresh_table(self) -> None:
         table = self.query_one("#table", DataTable)
         table.clear()
+        active_email = vscdb.get_active_email()
         active_name = vscdb.get_active_account_name()
-        active_install = vscdb.get_installation_id()
         # Live quota for the active row — overrides the stale per-profile
         # `extra.quota` snapshot when available.
         live_q = ratelimit.read_quota()
         live_daily = live_q.daily_remaining_pct if live_q.source != "unknown" else None
         for p in prof.list_profiles():
-            is_active = (
-                p.meta.account_name == active_name
-                and (not active_install or p.meta.installation_id == active_install)
+            is_active = prof._profile_matches_identity(
+                p, active_email or "", active_name or ""
             )
             stashed = (p.meta.extra or {}).get("quota") or {}
             if is_active and live_daily is not None:
@@ -237,16 +236,15 @@ class WindServerTUI(App):
             return
         if self._col_daily_key is None:
             return
-        active_name = vscdb.get_active_account_name()
-        active_install = vscdb.get_installation_id()
-        if not active_name:
+        active_email = vscdb.get_active_email()
+        if not active_email:
             return
         live_q = ratelimit.read_quota()
         live_daily = live_q.daily_remaining_pct if live_q.source != "unknown" else None
         if live_daily is None:
             return
         # Find the matching profile slug to address its row.
-        match = prof.find_matching_profile(active_name, active_install or "")
+        match = prof.find_matching_profile(active_email, vscdb.get_active_account_name() or "")
         if match is None:
             return
         table = self.query_one("#table", DataTable)
@@ -303,12 +301,17 @@ class WindServerTUI(App):
     def action_save_current(self) -> None:
         try:
             current = prof.snapshot_current()
-            match = prof.find_matching_profile(current.meta.account_name, current.meta.installation_id, prof.email_from_profile(current))
+            email = prof.email_from_profile(current)
+            account = current.meta.account_name
+            match = prof.find_matching_profile(email, account)
             if match:
                 prof.inherit_persistent_meta(current, match)
                 current.save()
                 self.notify(f"Updated: {current.meta.slug}")
             else:
+                current.meta.slug = prof._ensure_unique_slug(
+                    current.meta.slug, email, account
+                )
                 current.save()
                 self.notify(f"Added: {current.meta.slug}")
         except Exception as e:

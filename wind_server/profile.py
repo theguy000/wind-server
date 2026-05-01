@@ -28,6 +28,32 @@ def _slug(name: str) -> str:
     return s or "profile"
 
 
+def _slug_matches_identity(slug: str, email: str, account_name: str) -> bool:
+    """Check if an existing profile directory belongs to the same identity."""
+    try:
+        return _profile_matches_identity(load_profile(slug), email, account_name)
+    except Exception:
+        return False
+
+
+def _ensure_unique_slug(slug: str, email: str, account_name: str = "") -> str:
+    """Return a slug that won't overwrite an existing profile with a different identity.
+
+    If the directory already exists and belongs to a different email/account,
+    append -2, -3, … until we find a free slot.
+    """
+    target = _profiles_dir() / slug
+    if not target.exists() or _slug_matches_identity(slug, email, account_name):
+        return slug
+    n = 2
+    while True:
+        candidate = f"{slug}-{n}"
+        cpath = _profiles_dir() / candidate
+        if not cpath.exists() or _slug_matches_identity(candidate, email, account_name):
+            return candidate
+        n += 1
+
+
 @dataclass
 class ProfileMeta:
     slug: str
@@ -166,7 +192,10 @@ def snapshot_current(label: str = "") -> Profile:
     ident = storage_json.read_identity()
     now = time.time()
 
-    slug = _slug(label or account)
+    # Extract email for slug generation (shared helper avoids duplication)
+    email = _extract_email_from_auth(auth)
+
+    slug = _ensure_unique_slug(_slug(label or email or account), email, account)
     extra: dict = {}
     quota = _capture_quota_extra()
     if quota:
@@ -199,8 +228,9 @@ def inherit_persistent_meta(fresh: "Profile", match: "Profile") -> None:
     fresh.meta.last_active_at = match.meta.last_active_at
 
 
-def email_from_profile(p: Profile) -> str:
-    val = p.auth_rows.get("codeium.windsurf", "")
+def _extract_email_from_auth(auth_rows: dict[str, str]) -> str:
+    """Extract lastLoginEmail from the codeium.windsurf auth row."""
+    val = auth_rows.get("codeium.windsurf", "")
     if not val:
         return ""
     try:
@@ -210,16 +240,37 @@ def email_from_profile(p: Profile) -> str:
     return data.get("lastLoginEmail") or ""
 
 
-def find_matching_profile(account_name: str, installation_id: str, email: str = "") -> Profile | None:
-    """Locate an existing profile that matches the given identity."""
+def email_from_profile(p: Profile) -> str:
+    return _extract_email_from_auth(p.auth_rows)
+
+
+def _profile_matches_identity(p: Profile, email: str, account_name: str = "") -> bool:
+    """Check whether a profile matches the given identity.
+
+    Prefers email matching. Falls back to account_name when email is empty,
+    preserving compatibility with older profiles that lack lastLoginEmail.
+    """
+    if email:
+        return email_from_profile(p) == email
+    # Fallback: match on account_name when email is unavailable
+    if account_name:
+        return p.meta.account_name == account_name
+    return False
+
+
+def find_matching_profile(email: str, account_name: str = "") -> Profile | None:
+    """Locate an existing profile that matches the given identity.
+
+    Prefers email matching. Falls back to account_name when email is empty,
+    preserving compatibility with older profiles that lack lastLoginEmail.
+    """
+    fallback = None
     for p in list_profiles():
-        if p.meta.account_name == account_name and (
-            not installation_id or p.meta.installation_id == installation_id
-        ):
-            if email and _email_from_profile(p) != email:
-                continue
+        if email and email_from_profile(p) == email:
             return p
-    return None
+        if account_name and p.meta.account_name == account_name and fallback is None:
+            fallback = p
+    return fallback
 
 
 def _merge_live_quota(profile: Profile) -> None:
@@ -264,7 +315,8 @@ def save_current_before_switch() -> str | None:
         current = snapshot_current()
     except RuntimeError:
         return None
-    match = find_matching_profile(current.meta.account_name, current.meta.installation_id, email_from_profile(current))
+    email = email_from_profile(current)
+    match = find_matching_profile(email, current.meta.account_name)
     if not match:
         return None
     inherit_persistent_meta(current, match)

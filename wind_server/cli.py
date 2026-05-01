@@ -34,8 +34,8 @@ def main(verbose: bool) -> None:
 
 @main.command("list", help="List all saved profiles and the active account.")
 def cmd_list() -> None:
+    active_email = vscdb.get_active_email()
     active_name = vscdb.get_active_account_name()
-    active_install = vscdb.get_installation_id()
     profiles = prof.list_profiles()
     if not profiles:
         click.echo("No saved profiles. Run `wind-server add` to capture the current account.")
@@ -43,9 +43,8 @@ def cmd_list() -> None:
     click.echo("-" * 92)
     seen_active = False
     for p in profiles:
-        is_active = (
-            p.meta.account_name == active_name
-            and (not active_install or p.meta.installation_id == active_install)
+        is_active = prof._profile_matches_identity(
+            p, active_email or "", active_name or ""
         )
         if is_active:
             seen_active = True
@@ -59,10 +58,10 @@ def cmd_list() -> None:
             f"{marker:6} {p.meta.slug:20} {p.meta.account_name:28} "
             f"{p.meta.label or '-':14} {switched:16}"
         )
-    if active_name and not seen_active:
+    if (active_email or active_name) and not seen_active:
         click.echo()
         click.echo(
-            f"  ! Active account '{active_name}' is NOT in your saved profiles. "
+            f"  ! Active account '{active_name}' ({active_email or 'no email'}) is NOT in your saved profiles. "
             "Run `wind-server add` to capture it."
         )
 
@@ -73,8 +72,9 @@ def cmd_list() -> None:
 def cmd_add(label: str, name: str) -> None:
     # label is passed separately; name only affects slug if provided
     p = prof.snapshot_current(label=label)
+    email = prof.email_from_profile(p)
     if name:
-        p.meta.slug = prof._slug(name)
+        p.meta.slug = prof._ensure_unique_slug(prof._slug(name), email, p.meta.account_name)
     target_dir = paths.PROFILES_DIR / p.meta.slug
     if target_dir.exists():
         click.confirm(f"Profile '{p.meta.slug}' already exists. Overwrite?", abort=True)
@@ -86,13 +86,18 @@ def cmd_add(label: str, name: str) -> None:
 @click.argument("slug", required=False)
 def cmd_save(slug: str | None) -> None:
     fresh = prof.snapshot_current()
+    email = prof.email_from_profile(fresh)
+    account = fresh.meta.account_name
     if slug is None:
-        existing = prof.find_matching_profile(fresh.meta.account_name, fresh.meta.installation_id)
+        existing = prof.find_matching_profile(email, account)
         if existing:
             slug = existing.meta.slug
         else:
-            slug = fresh.meta.slug
+            slug = prof._ensure_unique_slug(fresh.meta.slug, email, account)
             click.echo(f"No matching profile found; creating new one: {slug}")
+    else:
+        # Explicit slug: still ensure we don't overwrite a different identity
+        slug = prof._ensure_unique_slug(slug, email, account)
     fresh.meta.slug = slug
     # Preserve persistent meta (created_at, label, last_active_at) if the
     # profile already exists.
@@ -239,19 +244,17 @@ def _auto_switch(workspace: str | None) -> None:
     if len(profiles) < 2:
         click.echo("  ! need at least 2 saved profiles to auto-switch.")
         return
-    active_name = vscdb.get_active_account_name()
-    install = vscdb.get_installation_id()
+    active_email = vscdb.get_active_email()
+    active_name = vscdb.get_active_account_name() or ""
     # Find current index
     current_idx = -1
     for i, p in enumerate(profiles):
-        if p.meta.account_name == active_name and (
-            not install or p.meta.installation_id == install
-        ):
+        if prof._profile_matches_identity(p, active_email or "", active_name):
             current_idx = i
             break
     next_idx = (current_idx + 1) % len(profiles)
     target = profiles[next_idx]
-    if target.meta.account_name == active_name:
+    if prof._profile_matches_identity(target, active_email or "", active_name):
         click.echo("  ! only one usable profile; cannot rotate.")
         return
     click.echo(f"  → switching to '{target.meta.slug}'")
