@@ -247,30 +247,34 @@ def email_from_profile(p: Profile) -> str:
 def _profile_matches_identity(p: Profile, email: str, account_name: str = "") -> bool:
     """Check whether a profile matches the given identity.
 
-    Prefers email matching. Falls back to account_name when email is empty,
-    preserving compatibility with older profiles that lack lastLoginEmail.
+    Requires email match (with account_name verification when also provided).
+    Does NOT fall back to account_name alone — it may be shared across
+    different accounts (e.g. multiple trial accounts with the same display name).
     """
-    if email:
-        return email_from_profile(p) == email
-    # Fallback: match on account_name when email is unavailable
-    if account_name:
-        return p.meta.account_name == account_name
-    return False
+    if not email:
+        return False
+    if email_from_profile(p) != email:
+        return False
+    # Email matches — also verify account_name when available
+    return not account_name or p.meta.account_name == account_name
 
 
 def find_matching_profile(email: str, account_name: str = "") -> Profile | None:
     """Locate an existing profile that matches the given identity.
 
-    Prefers email matching. Falls back to account_name when email is empty,
-    preserving compatibility with older profiles that lack lastLoginEmail.
+    Matches by email (with account_name verification when both are
+    provided). Does NOT fall back to account_name — it may be shared
+    across different accounts (e.g. multiple trial accounts with the
+    same display name), and returning the wrong profile would cause a
+    cross-account overwrite.
     """
-    fallback = None
+    if not email:
+        return None
     for p in list_profiles():
-        if email and email_from_profile(p) == email:
-            return p
-        if account_name and p.meta.account_name == account_name and fallback is None:
-            fallback = p
-    return fallback
+        if email_from_profile(p) == email:
+            if not account_name or p.meta.account_name == account_name:
+                return p
+    return None
 
 
 def _merge_live_quota(profile: Profile) -> None:

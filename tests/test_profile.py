@@ -101,18 +101,45 @@ def test_find_matching_profile(env) -> None:
     assert prof.find_matching_profile("nobody@example.com") is None
 
 
-def test_find_matching_profile_fallback_on_account_name(env) -> None:
-    """When email is empty, find_matching_profile falls back to account_name."""
+def test_find_matching_profile_returns_none_when_email_empty(env) -> None:
+    """When email is empty, find_matching_profile returns None (no account_name fallback)."""
     alice = prof.snapshot_current()
-    # Simulate a profile with no email (e.g. older Windsurf version)
-    alice.auth_rows["codeium.windsurf"] = json.dumps(
-        {"codeium.installationId": alice.meta.installation_id}
-    )
     alice.save()
-    # Email-based match should fail, account_name fallback should work
     assert prof.find_matching_profile("") is None
-    found = prof.find_matching_profile("", "Alice")
-    assert found is not None and found.meta.slug == alice.meta.slug
+    assert prof.find_matching_profile("", "Alice") is None
+
+
+def test_find_matching_profile_no_account_name_fallback_when_email_mismatch(env) -> None:
+    """When email is provided but doesn't match, do NOT fall back to account_name.
+
+    Multiple accounts can share the same account_name (e.g. trial accounts all
+    named "asd asd"). Falling back to account_name would return the wrong
+    profile and cause a cross-account overwrite.
+    """
+    alice = prof.snapshot_current()
+    alice.save()
+    # Search with a non-matching email but the correct account_name —
+    # must return None, not Alice's profile.
+    assert prof.find_matching_profile("nobody@example.com", "Alice") is None
+
+
+def test_find_matching_profile_email_with_account_name_verification(env, monkeypatch) -> None:
+    """When email matches but account_name differs, do NOT return that profile.
+
+    This prevents stale lastLoginEmail from causing a cross-account overwrite
+    when two accounts have different account_names.
+    """
+    alice = prof.snapshot_current()
+    alice.save()
+
+    # Create a second profile (Bob) with a different email but same account_name
+    env["db"].unlink()
+    _build_db(env["db"], "Bob", "install-B", email="bob@example.com")
+    bob = prof.snapshot_current()
+    bob.save()
+
+    # Now search for alice's email with Bob's account_name — must not return Alice
+    assert prof.find_matching_profile("alice@example.com", "Bob") is None
 
 
 def test_snapshot_captures_quota_into_extra(env) -> None:
