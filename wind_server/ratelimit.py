@@ -44,29 +44,37 @@ DEFAULT_THRESHOLD_PCT = 5  # swap when daily remaining drops below this
 class QuotaSnapshot:
     daily_remaining_pct: int | None  # 0..100, None if unknown
     weekly_remaining_pct: int | None
-    raw_status_code: int
-    rate_limited: bool      # explicit 429 / RESOURCE_EXHAUSTED
+    daily_reset_at: int | None = None
+    weekly_reset_at: int | None = None
+    raw_status_code: int = 0
+    rate_limited: bool = False      # explicit 429 / RESOURCE_EXHAUSTED
     source: str = "unknown"  # "lsp_live" | "cached_plan_info" | "http" | "unknown"
 
     @property
     def is_low(self) -> bool:
         if self.rate_limited:
             return True
-        if self.daily_remaining_pct is not None:
-            return self.daily_remaining_pct < DEFAULT_THRESHOLD_PCT
+        if self.daily_remaining_pct is not None and self.daily_remaining_pct < DEFAULT_THRESHOLD_PCT:
+            return True
+        if self.weekly_remaining_pct is not None and self.weekly_remaining_pct < DEFAULT_THRESHOLD_PCT:
+            return True
         return False
 
 
 def _from_cached_plan_info(db_path: Path | None) -> QuotaSnapshot:
     info = vscdb.read_cached_plan_info(db_path)
     if not info:
-        return QuotaSnapshot(None, None, 0, False, source="unknown")
+        return QuotaSnapshot(None, None, raw_status_code=0, rate_limited=False, source="unknown")
     qu = info.get("quotaUsage") or {}
     daily = qu.get("dailyRemainingPercent")
     weekly = qu.get("weeklyRemainingPercent")
+    d_reset = qu.get("dailyResetAtUnix")
+    w_reset = qu.get("weeklyResetAtUnix")
     return QuotaSnapshot(
         daily_remaining_pct=int(daily) if isinstance(daily, (int, float)) else None,
         weekly_remaining_pct=int(weekly) if isinstance(weekly, (int, float)) else None,
+        daily_reset_at=int(d_reset) if isinstance(d_reset, (int, float)) else None,
+        weekly_reset_at=int(w_reset) if isinstance(w_reset, (int, float)) else None,
         raw_status_code=200 if daily is not None else 0,
         rate_limited=False,
         source="cached_plan_info" if daily is not None else "unknown",
@@ -89,14 +97,14 @@ def read_quota(
     if prefer_live:
         status = lsp_client.get_user_status()
         if status is not None:
-            daily, weekly = lsp_client.extract_quota_percents(status)
+            daily, weekly, d_reset, w_reset = lsp_client.extract_quota_info(status)
             # LSP returns None when quota is exhausted, treat as 0% remaining
             if daily is not None or weekly is not None:
-                # If daily is None but we got a response, daily is exhausted (0%)
-                effective_daily = daily if daily is not None else 0
                 return QuotaSnapshot(
-                    daily_remaining_pct=effective_daily,
-                    weekly_remaining_pct=weekly,
+                    daily_remaining_pct=daily if daily is not None else 0,
+                    weekly_remaining_pct=weekly if weekly is not None else 0,
+                    daily_reset_at=d_reset,
+                    weekly_reset_at=w_reset,
                     raw_status_code=200,
                     rate_limited=False,
                     source="lsp_live",
@@ -104,7 +112,9 @@ def read_quota(
             # Both None means exhausted - daily is definitely 0
             return QuotaSnapshot(
                 daily_remaining_pct=0,  # Exhausted
-                weekly_remaining_pct=weekly,
+                weekly_remaining_pct=0,  # Exhausted
+                daily_reset_at=d_reset,
+                weekly_reset_at=w_reset,
                 raw_status_code=200,
                 rate_limited=False,
                 source="lsp_live",

@@ -58,7 +58,6 @@ def _ensure_unique_slug(slug: str, email: str, account_name: str = "") -> str:
 class ProfileMeta:
     slug: str
     account_name: str       # Windsurf display name (codeium.windsurf-windsurf_auth)
-    label: str = ""         # user-supplied alias (e.g. "personal", "trial-3")
     installation_id: str = ""
     session_jwt_preview: str = ""   # first 24 chars, for display
     created_at: float = 0.0
@@ -74,7 +73,6 @@ class ProfileMeta:
         return cls(
             slug=d["slug"],
             account_name=d.get("account_name", ""),
-            label=d.get("label", ""),
             installation_id=d.get("installation_id", ""),
             session_jwt_preview=d.get("session_jwt_preview", ""),
             created_at=d.get("created_at", 0.0),
@@ -143,41 +141,40 @@ def _capture_quota_extra() -> dict:
     from . import ratelimit
 
     q = ratelimit.read_quota()
-    if q.source != "unknown":
-        out: dict = {"captured_at": time.time(), "source": q.source}
-        out["daily_remaining_pct"] = q.daily_remaining_pct if q.daily_remaining_pct is not None else 0
-        if q.weekly_remaining_pct is not None:
-            out["weekly_remaining_pct"] = q.weekly_remaining_pct
-        # Refresh reset time from cached plan info when available
+    if q.source == "unknown":
+        return {}
+
+    out: dict = {"captured_at": time.time(), "source": q.source}
+    out["daily_remaining_pct"] = q.daily_remaining_pct if q.daily_remaining_pct is not None else 0
+    if q.weekly_remaining_pct is not None:
+        out["weekly_remaining_pct"] = q.weekly_remaining_pct
+
+    # Use reset times from snapshot if available (LSP provides fresh ones now)
+    if q.daily_reset_at is not None:
+        out["daily_reset_at"] = q.daily_reset_at
+    if q.weekly_reset_at is not None:
+        out["weekly_reset_at"] = q.weekly_reset_at
+
+    # Fallback to DB for reset times ONLY if snapshot is missing them
+    if q.daily_reset_at is None or q.weekly_reset_at is None:
         info = vscdb.read_cached_plan_info()
         if info:
             qu = info.get("quotaUsage") or {}
-            reset = qu.get("dailyResetAtUnix")
-            if isinstance(reset, (int, float)):
-                out["daily_reset_at"] = int(reset)
-        return out
-
-    # Fallback: stale cached plan info (LSP unavailable)
-    info = vscdb.read_cached_plan_info()
-    if not info:
-        return {}
-    qu = info.get("quotaUsage") or {}
-    daily = qu.get("dailyRemainingPercent")
-    weekly = qu.get("weeklyRemainingPercent")
-    if daily is None and weekly is None:
-        return {}
-    out = {"captured_at": time.time(), "source": "cached_plan_info"}
-    if isinstance(daily, (int, float)):
-        out["daily_remaining_pct"] = int(daily)
-    if isinstance(weekly, (int, float)):
-        out["weekly_remaining_pct"] = int(weekly)
-    reset = qu.get("dailyResetAtUnix")
-    if isinstance(reset, (int, float)):
-        out["daily_reset_at"] = int(reset)
+            if q.daily_reset_at is None:
+                reset = qu.get("dailyResetAtUnix")
+                if isinstance(reset, (int, float)):
+                    out["daily_reset_at"] = int(reset)
+            if q.weekly_reset_at is None:
+                w_reset = qu.get("weeklyResetAtUnix")
+                if isinstance(w_reset, (int, float)):
+                    out["weekly_reset_at"] = int(w_reset)
     return out
 
+    # Unreachable fallback case (read_quota handles DB read now)
+    return {}
 
-def snapshot_current(label: str = "") -> Profile:
+
+def snapshot_current() -> Profile:
     """Capture the currently active Windsurf account into a Profile object.
 
     Caller must call .save() to persist.
@@ -194,8 +191,8 @@ def snapshot_current(label: str = "") -> Profile:
 
     # Extract email for slug generation (shared helper avoids duplication)
     email = _extract_email_from_auth(auth)
-
-    slug = _ensure_unique_slug(_slug(label or email or account), email, account)
+ 
+    slug = _ensure_unique_slug(_slug(email or account), email, account)
     extra: dict = {}
     quota = _capture_quota_extra()
     if quota:
@@ -203,7 +200,6 @@ def snapshot_current(label: str = "") -> Profile:
     meta = ProfileMeta(
         slug=slug,
         account_name=account,
-        label=label,
         installation_id=install_id,
         session_jwt_preview=jwt[:24],
         created_at=now,
@@ -216,15 +212,14 @@ def snapshot_current(label: str = "") -> Profile:
 def inherit_persistent_meta(fresh: "Profile", match: "Profile") -> None:
     """Copy fields that should survive an auto-save from `match` into `fresh`.
 
-    `snapshot_current()` only knows about live state — it has no idea what
-    the user-supplied label was, when the profile was first created, or when
-    we last switched into it. When auto-saving (daemon, `cli save`, TUI
-    save / pre-switch save) we must carry those forward, otherwise every
-    auto-save zeroes `last_active_at`.
+    `snapshot_current()` only knows about live state — it has no idea
+    when the profile was first created, or when we last switched into it.
+    When auto-saving (daemon, `cli save`, TUI save / pre-switch save) we
+    must carry those forward, otherwise every auto-save zeroes
+    `last_active_at`.
     """
     fresh.meta.slug = match.meta.slug
     fresh.meta.created_at = match.meta.created_at or fresh.meta.created_at
-    fresh.meta.label = match.meta.label or fresh.meta.label
     fresh.meta.last_active_at = match.meta.last_active_at
 
 
@@ -296,14 +291,27 @@ def _merge_live_quota(profile: Profile) -> None:
         quota["daily_remaining_pct"] = q.daily_remaining_pct
     if q.weekly_remaining_pct is not None:
         quota["weekly_remaining_pct"] = q.weekly_remaining_pct
+
+    # Propagate reset times
+    if q.daily_reset_at is not None:
+        quota["daily_reset_at"] = q.daily_reset_at
+    if q.weekly_reset_at is not None:
+        quota["weekly_reset_at"] = q.weekly_reset_at
+
     quota["captured_at"] = time.time()
-    # Refresh reset time from cached plan info when available
-    info = vscdb.read_cached_plan_info()
-    if info:
-        qu = info.get("quotaUsage") or {}
-        reset = qu.get("dailyResetAtUnix")
-        if isinstance(reset, (int, float)):
-            quota["daily_reset_at"] = int(reset)
+    # Refresh reset time from cached plan info ONLY if snapshot is missing them
+    if q.daily_reset_at is None or q.weekly_reset_at is None:
+        info = vscdb.read_cached_plan_info()
+        if info:
+            qu = info.get("quotaUsage") or {}
+            if q.daily_reset_at is None:
+                reset = qu.get("dailyResetAtUnix")
+                if isinstance(reset, (int, float)):
+                    quota["daily_reset_at"] = int(reset)
+            if q.weekly_reset_at is None:
+                w_reset = qu.get("weeklyResetAtUnix")
+                if isinstance(w_reset, (int, float)):
+                    quota["weekly_reset_at"] = int(w_reset)
 
 
 def save_current_before_switch() -> str | None:

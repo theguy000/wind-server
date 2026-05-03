@@ -8,7 +8,8 @@ from datetime import datetime
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
-from textual.widgets import DataTable, Footer, Input, Static
+from textual.widgets import DataTable, Footer, Header, Input, Static
+from textual.widgets._header import HeaderIcon
 
 from . import profile as prof
 from . import ratelimit, vscdb, windsurf_proc
@@ -24,48 +25,45 @@ def _email_from_profile(p: prof.Profile) -> str:
 
 
 def _fmt(ts: float) -> str:
-    return datetime.fromtimestamp(ts).strftime("%I:%M %p %m-%d") if ts else "—"
+    if not ts:
+        return "—"
+    diff = time.time() - ts
+    if diff < 60:
+        return "just now"
+    if diff < 3600:
+        return f"{int(diff // 60)}m ago"
+    if diff < 86400:
+        return f"{int(diff // 3600)}h ago"
+    if diff < 86400 * 7:
+        return f"{int(diff // 86400)}d ago"
+    return datetime.fromtimestamp(ts).strftime("%m-%d")
 
 
 class WindServerTUI(App):
+    TITLE = "🚀 Wind Server"
+    SUB_TITLE = "Profile Manager"
+
     CSS = """
     Screen {
         layout: vertical;
-        background: $surface;
-    }
-
-    #header {
-        dock: top;
-        height: 3;
-        background: $primary;
-        color: $text;
-        padding: 0 2;
-        border-bottom: solid $primary-darken-2;
-    }
-
-    #header-title {
-        width: 1fr;
-        content-align: left middle;
-    }
-
-    #header-clock {
-        width: auto;
-        content-align: right middle;
-        color: $text-muted;
+        background: $background;
     }
 
     #status {
-        dock: top;
-        height: 3;
-        padding: 0 2;
+        height: auto;
+        padding: 1 2;
+        margin: 1 2 1 2;
         background: $surface;
         color: $text;
-        border-bottom: solid $primary-darken-2;
+        border: solid $primary;
+        content-align: center middle;
     }
 
     #table {
         height: 1fr;
+        margin: 0 2 1 2;
         background: $surface;
+        border: solid $primary;
     }
 
     DataTable {
@@ -74,38 +72,56 @@ class WindServerTUI(App):
     }
 
     DataTable > .datatable--header {
-        background: $primary-darken-1;
+        background: $panel;
         color: $text;
+        text-style: bold;
     }
 
     DataTable > .datatable--hover {
-        background: $primary-darken-2;
+        background: $boost;
         color: $text;
     }
 
     DataTable > .datatable--cursor {
-        background: $primary-darken-2;
-        color: $text;
+        background: $accent;
+        color: auto;
+        text-style: bold;
     }
 
     Footer {
         dock: bottom;
-        background: $primary-darken-1;
+        background: $panel;
         color: $text;
-        border-top: none;
+        border-top: solid $background;
     }
+
+    HeaderIcon {
+        width: auto;
+        padding: 0 1;
+    }
+
 
     Input {
         dock: bottom;
         margin: 0 2 1 2;
+    }
+
+    Screen.-fullscreen Header { display: none; }
+    Screen.-fullscreen Footer { display: none; }
+    Screen.-fullscreen #status { margin: 0; }
+    Screen.-fullscreen #table {
+        margin: 0;
+        height: 1fr;
+        border: none;
     }
     """
     BINDINGS = [
         Binding("enter", "switch_selected", "Switch"),
         Binding("s", "save_current", "Save current"),
         Binding("r", "refresh", "Refresh"),
-        Binding("l", "edit_label", "Label"),
-        Binding("q", "quit", "Quit"),
+        Binding("f", "toggle_fullscreen", "Fullscreen"),
+        Binding("c", "command_palette", "[u]Commands[/u]"),
+        Binding("q", "quit", "[u]Q[/u]uit"),
     ]
 
     # How often to re-poll live quota for the active account (seconds).
@@ -116,40 +132,32 @@ class WindServerTUI(App):
         self.editing_slug: str | None = None
         # Populated in on_mount; needed for in-place cell updates on auto-refresh.
         self._col_daily_key = None
+        self._col_weekly_key = None
         self._col_switched_key = None
 
     def compose(self) -> ComposeResult:
-        now = datetime.now().strftime("%H:%M")
-        yield Horizontal(
-            Static("[b]Wind Server[/b]  [dim]Profile Manager[/dim]", id="header-title"),
-            Static(now, id="header-clock"),
-            id="header",
-        )
+        yield Header(show_clock=True, time_format="%I:%M %p")
         yield Static("", id="status")
-        yield DataTable(id="table", cursor_type="row", zebra_stripes=False)
+        yield DataTable(id="table", cursor_type="row", zebra_stripes=True)
         yield Footer()
 
     def on_mount(self) -> None:
+        # Replace the default header icon with Commands + Quit.
+        header_icon = self.query_one(HeaderIcon)
+        header_icon.icon = "[u]C[/u]ommands │ [u]Q[/u]uit"
+        header_icon.tooltip = "Open command palette (c) │ Quit (q)"
+
         table = self.query_one("#table", DataTable)
-        keys = table.add_columns("", "email", "account", "label", "daily used", "last active")
+        keys = table.add_columns("", "Email", "Account", "Daily Used", "Weekly Used", "Last Active")
         # `add_columns` returns the list of ColumnKey objects in order.
-        self._col_daily_key = keys[4]
+        self._col_daily_key = keys[3]
+        self._col_weekly_key = keys[4]
         self._col_switched_key = keys[5]
         self.action_refresh()
         # Auto-refresh: only the live status bar + the active row's daily cell.
         # We deliberately do NOT rebuild the whole table on a timer — that
         # would reset cursor position mid-navigation.
         self.set_interval(self.AUTO_REFRESH_INTERVAL, self._tick)
-        # Tick the header clock once a second so HH:MM stays accurate at
-        # the minute boundary without piggy-backing on the slower refresh.
-        self.set_interval(1.0, self._update_clock)
-
-    def _update_clock(self) -> None:
-        now = datetime.now().strftime("%H:%M")
-        try:
-            self.query_one("#header-clock", Static).update(now)
-        except Exception:
-            pass
 
     # --- helpers ---------------------------------------------------------
 
@@ -164,11 +172,13 @@ class WindServerTUI(App):
                 return "?% [?% rem]"
             return f"{100 - rem}% [{rem}% rem]"
 
-        warn = "  ⚠ LOW" if q.is_low else ""
-        status_color = "yellow" if q.is_low else "green"
+        warn = "  ⚠️ LOW" if q.is_low else ""
+        status_color = "red" if q.is_low else "green"
         self.query_one("#status", Static).update(
-            f"  [b]Account[/b] {active}  │  [b]Email[/b] {email}  │  [b]Windsurf[/b] {running}  │  "
-            f"[b]Daily[/b] [{status_color}]{_used(q.daily_remaining_pct)}[/{status_color}]  │  "
+            f"[b]Account[/b] [cyan]{active}[/cyan]  •  "
+            f"[b]Email[/b] [cyan]{email}[/cyan]  •  "
+            f"[b]Windsurf[/b] [magenta]{running}[/magenta]  •  "
+            f"[b]Daily[/b] [{status_color}]{_used(q.daily_remaining_pct)}[/{status_color}]  •  "
             f"[b]Weekly[/b] [{status_color}]{_used(q.weekly_remaining_pct)}[/{status_color}]{warn}"
         )
 
@@ -181,42 +191,89 @@ class WindServerTUI(App):
         # `extra.quota` snapshot when available.
         live_q = ratelimit.read_quota()
         live_daily = live_q.daily_remaining_pct if live_q.source != "unknown" else None
+        live_weekly = live_q.weekly_remaining_pct if live_q.source != "unknown" else None
         for p in prof.list_profiles():
             is_active = prof._profile_matches_identity(
                 p, active_email or "", active_name or ""
             )
             stashed = (p.meta.extra or {}).get("quota") or {}
+            # Daily quota
+            stale_daily = False
             if is_active and live_daily is not None:
                 daily_rem = live_daily
-                stale = False
             else:
                 daily_rem = stashed.get("daily_remaining_pct")
-                # If the daily reset time has already passed, the captured
-                # percentage is no longer valid — treat it as unknown.
                 reset_at = stashed.get("daily_reset_at") or 0
                 captured_at = stashed.get("captured_at") or 0
                 if reset_at and time.time() >= reset_at:
                     daily_rem = 100
                 else:
-                    stale = bool(reset_at and captured_at and captured_at < reset_at)
-            if isinstance(daily_rem, int):
-                daily_cell = f"{100 - daily_rem}%{'?' if stale else ''}"
+                    stale_daily = bool(reset_at and captured_at and captured_at < reset_at)
+
+            # Weekly quota
+            stale_weekly = False
+            if is_active and live_weekly is not None:
+                weekly_rem = live_weekly
             else:
-                daily_cell = "—"
+                weekly_rem = stashed.get("weekly_remaining_pct")
+                w_reset_at = stashed.get("weekly_reset_at") or 0
+                captured_at = stashed.get("captured_at") or 0
+                if w_reset_at and time.time() >= w_reset_at:
+                    weekly_rem = 100
+                else:
+                    stale_weekly = bool(w_reset_at and captured_at and captured_at < w_reset_at)
 
             if is_active:
-                switched_cell = "active now"
-            elif p.meta.last_active_at:
-                switched_cell = _fmt(p.meta.last_active_at)
+                marker = "[bold green]▶[/bold green]"
+                email_cell = f"[bold green]{_email_from_profile(p)}[/]"
+                account_cell = f"[bold green]{p.meta.account_name}[/]"
+                switched_cell = "[bold green]active now[/]"
+
+                if isinstance(daily_rem, int):
+                    used_daily = 100 - daily_rem
+                    d_color = "#ff5555" if used_daily == 100 else "green"
+                    daily_cell = f"[bold {d_color}]{used_daily}%{'?' if stale_daily else ''}[/]"
+                else:
+                    daily_cell = "[bold green]—[/]"
+
+                if isinstance(weekly_rem, int):
+                    used_weekly = 100 - weekly_rem
+                    w_color = "#ff5555" if used_weekly == 100 else "green"
+                    weekly_cell = f"[bold {w_color}]{used_weekly}%{'?' if stale_weekly else ''}[/]"
+                else:
+                    weekly_cell = "[bold green]—[/]"
             else:
-                switched_cell = "—"
+                marker = "[dim]○[/dim]"
+                email_cell = _email_from_profile(p)
+                account_cell = p.meta.account_name
+
+                if p.meta.last_active_at:
+                    switched_cell = _fmt(p.meta.last_active_at)
+                else:
+                    switched_cell = "—"
+
+                if isinstance(daily_rem, int):
+                    used_daily = 100 - daily_rem
+                    daily_cell = f"{used_daily}%{'?' if stale_daily else ''}"
+                    if used_daily == 100:
+                        daily_cell = f"[#ff5555]{daily_cell}[/]"
+                else:
+                    daily_cell = "—"
+
+                if isinstance(weekly_rem, int):
+                    used_weekly = 100 - weekly_rem
+                    weekly_cell = f"{used_weekly}%{'?' if stale_weekly else ''}"
+                    if used_weekly == 100:
+                        weekly_cell = f"[#ff5555]{weekly_cell}[/]"
+                else:
+                    weekly_cell = "—"
 
             table.add_row(
-                "●" if is_active else "○",
-                _email_from_profile(p),
-                p.meta.account_name,
-                p.meta.label or "-",
+                marker,
+                email_cell,
+                account_cell,
                 daily_cell,
+                weekly_cell,
                 switched_cell,
                 key=p.meta.slug,
             )
@@ -231,7 +288,6 @@ class WindServerTUI(App):
         """
         try:
             self._refresh_status()
-            self._update_clock()
         except Exception:
             return
         if self._col_daily_key is None:
@@ -249,12 +305,21 @@ class WindServerTUI(App):
             return
         table = self.query_one("#table", DataTable)
         try:
-            table.update_cell(match.meta.slug, self._col_daily_key, f"{100 - live_daily}%")
+            used_daily = 100 - live_daily
+            d_color = "#ff5555" if used_daily == 100 else "green"
+            table.update_cell(match.meta.slug, self._col_daily_key, f"[bold {d_color}]{used_daily}%[/]")
+            if live_q.weekly_remaining_pct is not None:
+                used_weekly = 100 - live_q.weekly_remaining_pct
+                w_color = "#ff5555" if used_weekly == 100 else "green"
+                table.update_cell(match.meta.slug, self._col_weekly_key, f"[bold {w_color}]{used_weekly}%[/]")
         except Exception:
             # Row may have been removed mid-tick; full refresh will fix it.
             pass
 
     # --- actions ---------------------------------------------------------
+
+    def action_toggle_fullscreen(self) -> None:
+        self.screen.toggle_class("-fullscreen")
 
     def action_refresh(self) -> None:
         self._refresh_status()
@@ -317,43 +382,6 @@ class WindServerTUI(App):
         except Exception as e:
             self.notify(f"Save failed: {e}", severity="error")
         self.action_refresh()
-
-    def action_edit_label(self) -> None:
-        table = self.query_one("#table", DataTable)
-        if table.row_count == 0:
-            return
-        row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
-        slug = row_key.value
-        if not slug:
-            return
-        self.editing_slug = slug
-        inp = Input(placeholder=f"New label for {slug}")
-        # Add explicit Esc binding
-        inp.bind("escape", "cancel_edit", description="Cancel")
-        self.mount(inp)
-        inp.focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if self.editing_slug:
-            try:
-                p = prof.load_profile(self.editing_slug)
-                p.meta.label = event.value
-                p.save()
-                self.notify(f"Labeled {self.editing_slug} → {event.value!r}")
-            except Exception as e:
-                self.notify(f"Failed: {e}", severity="error")
-        self.editing_slug = None
-        event.input.remove()
-        self.action_refresh()
-
-    def action_cancel_edit(self) -> None:
-        """Cancel label editing (bound to Esc in edit mode)."""
-        if self.editing_slug:
-            self.editing_slug = None
-            # Find and remove the Input widget
-            for inp in self.query(Input):
-                inp.remove()
-                break
 
 
 def run_tui() -> None:

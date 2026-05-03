@@ -167,23 +167,33 @@ def get_user_status(
         return None
 
 
-def extract_quota_percents(status: dict) -> tuple[int | None, int | None]:
-    """Return (daily_remaining_pct, weekly_remaining_pct) from a status dict.
+def extract_quota_info(status: dict) -> tuple[int | None, int | None, int | None, int | None]:
+    """Return (daily_rem_%, weekly_rem_%, daily_reset_at, weekly_reset_at) from a status dict.
 
     The server has been observed to use either field naming style:
       * `userStatus.planStatus.{dailyQuotaRemainingPercent, weeklyQuotaRemainingPercent}`
       * top-level fallbacks (older builds)
 
-    Returns (None, None) when neither path is present.
+    Returns (None, None, None, None) when no path is present.
     """
-    plan = (status.get("userStatus") or {}).get("planStatus") or {}
-    daily = plan.get("dailyQuotaRemainingPercent")
-    weekly = plan.get("weeklyQuotaRemainingPercent")
-    if daily is None and weekly is None:
+    plan = (status.get("userStatus") or {}).get("planStatus")
+    if plan is not None:
+        daily = plan.get("dailyQuotaRemainingPercent")
+        weekly = plan.get("weeklyQuotaRemainingPercent")
+        d_reset = plan.get("dailyQuotaResetAtUnix")
+        w_reset = plan.get("weeklyQuotaResetAtUnix")
+    else:
         # Older shape, just in case.
         daily = status.get("dailyQuotaRemainingPercent")
         weekly = status.get("weeklyQuotaRemainingPercent")
-    return (
-        int(daily) if isinstance(daily, (int, float)) else None,
-        int(weekly) if isinstance(weekly, (int, float)) else None,
-    )
+        d_reset = status.get("dailyQuotaResetAtUnix")
+        w_reset = status.get("weeklyQuotaResetAtUnix")
+
+    def _to_int(val):
+        if isinstance(val, (int, float)):
+            return int(val)
+        if isinstance(val, str) and val.strip().isdigit():
+            return int(val)
+        return None
+
+    return (_to_int(daily), _to_int(weekly), _to_int(d_reset), _to_int(w_reset))

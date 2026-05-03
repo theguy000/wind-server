@@ -39,8 +39,8 @@ def cmd_list() -> None:
     profiles = prof.list_profiles()
     if not profiles:
         click.echo("No saved profiles. Run `wind-server add` to capture the current account.")
-    click.echo(f"{'Active':6} {'Slug':20} {'Account':28} {'Label':14} {'Last active':20}")
-    click.echo("-" * 92)
+    click.echo(f"{'Active':6} {'Slug':20} {'Account':28} {'Last active':20}")
+    click.echo("-" * 78)
     seen_active = False
     for p in profiles:
         is_active = prof._profile_matches_identity(
@@ -55,8 +55,7 @@ def cmd_list() -> None:
             else "—"
         )
         click.echo(
-            f"{marker:6} {p.meta.slug:20} {p.meta.account_name:28} "
-            f"{p.meta.label or '-':14} {switched:16}"
+            f"{marker:6} {p.meta.slug:20} {p.meta.account_name:28} {switched:16}"
         )
     if (active_email or active_name) and not seen_active:
         click.echo()
@@ -67,11 +66,10 @@ def cmd_list() -> None:
 
 
 @main.command("add", help="Capture the currently active Windsurf account as a new profile.")
-@click.option("--label", default="", help="Optional human-friendly alias (e.g. 'personal').")
 @click.option("--name", default="", help="Override the slug. Defaults to the account name.")
-def cmd_add(label: str, name: str) -> None:
-    # label is passed separately; name only affects slug if provided
-    p = prof.snapshot_current(label=label)
+def cmd_add(name: str) -> None:
+    # name only affects slug if provided
+    p = prof.snapshot_current()
     email = prof.email_from_profile(p)
     if name:
         p.meta.slug = prof._ensure_unique_slug(prof._slug(name), email, p.meta.account_name)
@@ -99,7 +97,7 @@ def cmd_save(slug: str | None) -> None:
         # Explicit slug: still ensure we don't overwrite a different identity
         slug = prof._ensure_unique_slug(slug, email, account)
     fresh.meta.slug = slug
-    # Preserve persistent meta (created_at, label, last_active_at) if the
+    # Preserve persistent meta (created_at, last_active_at) if the
     # profile already exists.
     target_dir = paths.PROFILES_DIR / slug
     if (target_dir / "meta.json").exists():

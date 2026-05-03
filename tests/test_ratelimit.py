@@ -32,17 +32,25 @@ def test_scan_percent_bytes_empty() -> None:
 
 def test_quota_snapshot_is_low_uses_threshold(monkeypatch) -> None:
     monkeypatch.setattr(ratelimit, "DEFAULT_THRESHOLD_PCT", 5)
+    # Low daily
     q = ratelimit.QuotaSnapshot(daily_remaining_pct=4, weekly_remaining_pct=50,
                                 raw_status_code=200, rate_limited=False)
     assert q.is_low
 
-    q2 = ratelimit.QuotaSnapshot(daily_remaining_pct=20, weekly_remaining_pct=50,
+    # Low weekly
+    q2 = ratelimit.QuotaSnapshot(daily_remaining_pct=50, weekly_remaining_pct=3,
                                  raw_status_code=200, rate_limited=False)
-    assert not q2.is_low
+    assert q2.is_low
 
-    q3 = ratelimit.QuotaSnapshot(daily_remaining_pct=None, weekly_remaining_pct=None,
+    # Neither low
+    q3 = ratelimit.QuotaSnapshot(daily_remaining_pct=20, weekly_remaining_pct=50,
+                                 raw_status_code=200, rate_limited=False)
+    assert not q3.is_low
+
+    # Rate limited
+    q4 = ratelimit.QuotaSnapshot(daily_remaining_pct=None, weekly_remaining_pct=None,
                                  raw_status_code=429, rate_limited=True)
-    assert q3.is_low
+    assert q4.is_low
 
 
 def _make_db(tmp_path: Path, plan_info: dict | None) -> Path:
@@ -62,11 +70,18 @@ def _make_db(tmp_path: Path, plan_info: dict | None) -> Path:
 def test_read_quota_from_cached_plan_info(tmp_path: Path) -> None:
     db = _make_db(tmp_path, {
         "planName": "Free",
-        "quotaUsage": {"dailyRemainingPercent": 42, "weeklyRemainingPercent": 77},
+        "quotaUsage": {
+            "dailyRemainingPercent": 42,
+            "weeklyRemainingPercent": 77,
+            "dailyResetAtUnix": 12345,
+            "weeklyResetAtUnix": 67890
+        },
     })
     q = ratelimit.read_quota(db, prefer_live=False)
     assert q.daily_remaining_pct == 42
     assert q.weekly_remaining_pct == 77
+    assert q.daily_reset_at == 12345
+    assert q.weekly_reset_at == 67890
     assert q.source == "cached_plan_info"
     assert q.raw_status_code == 200
     assert not q.rate_limited
@@ -121,3 +136,63 @@ def test_read_quota_falls_back_when_lsp_unavailable(tmp_path: Path, monkeypatch)
     q = ratelimit.read_quota(db)
     assert q.daily_remaining_pct == 88
     assert q.source == "cached_plan_info"
+
+
+def test_read_quota_exhausted_lsp_response(monkeypatch) -> None:
+    # LSP returns valid JSON but with nulls for quota percents -> should be 0/0
+    monkeypatch.setattr(
+        ratelimit.lsp_client,
+        "get_user_status",
+        lambda **kwargs: {
+            "userStatus": {
+                "planStatus": {
+                    "dailyQuotaRemainingPercent": None,
+                    "weeklyQuotaRemainingPercent": None,
+                    "dailyQuotaResetAtUnix": 1000,
+                    "weeklyQuotaResetAtUnix": 2000,
+                }
+            }
+        },
+    )
+    q = ratelimit.read_quota(None)
+    assert q.daily_remaining_pct == 0
+    assert q.weekly_remaining_pct == 0
+    assert q.daily_reset_at == 1000
+    assert q.weekly_reset_at == 2000
+    assert q.source == "lsp_live"
+
+
+def test_read_quota_partial_exhausted_lsp_response(monkeypatch) -> None:
+    # Daily is null (0), weekly is 15
+    monkeypatch.setattr(
+        ratelimit.lsp_client,
+        "get_user_status",
+        lambda **kwargs: {
+            "userStatus": {
+                "planStatus": {
+                    "dailyQuotaRemainingPercent": None,
+                    "weeklyQuotaRemainingPercent": 15,
+                }
+            }
+        },
+    )
+    q = ratelimit.read_quota(None)
+    assert q.daily_remaining_pct == 0
+    assert q.weekly_remaining_pct == 15
+
+    # Daily is 20, weekly is null (0)
+    monkeypatch.setattr(
+        ratelimit.lsp_client,
+        "get_user_status",
+        lambda **kwargs: {
+            "userStatus": {
+                "planStatus": {
+                    "dailyQuotaRemainingPercent": 20,
+                    "weeklyQuotaRemainingPercent": None,
+                }
+            }
+        },
+    )
+    q = ratelimit.read_quota(None)
+    assert q.daily_remaining_pct == 20
+    assert q.weekly_remaining_pct == 0

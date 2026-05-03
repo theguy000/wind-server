@@ -72,7 +72,7 @@ def env(tmp_path: Path, monkeypatch) -> dict:
 
 def test_snapshot_and_restore_round_trip(env, monkeypatch) -> None:
     # Snapshot Alice
-    alice = prof.snapshot_current(label="primary")
+    alice = prof.snapshot_current()
     alice.save()
     assert (env["profiles_dir"] / alice.meta.slug).is_dir()
 
@@ -163,7 +163,7 @@ def test_snapshot_skips_quota_when_cache_missing(env) -> None:
 
 def test_inherit_persistent_meta_carries_last_active(env) -> None:
     # Simulate a profile that was switched into 1234 ago.
-    alice = prof.snapshot_current(label="primary")
+    alice = prof.snapshot_current()
     alice.meta.last_active_at = 1_700_001_234.0
     alice.save()
 
@@ -178,7 +178,6 @@ def test_inherit_persistent_meta_carries_last_active(env) -> None:
 
     reloaded = prof.load_profile(alice.meta.slug)
     assert reloaded.meta.last_active_at == 1_700_001_234.0
-    assert reloaded.meta.label == "primary"
     assert reloaded.meta.created_at == alice.meta.created_at
 
 
@@ -190,7 +189,7 @@ def test_save_current_before_switch_captures_quota(env) -> None:
               daily_remaining=42, weekly_remaining=75, daily_reset_at=1_700_000_000)
 
     # First, save Alice as a profile (no last_active_at yet).
-    alice = prof.snapshot_current(label="primary")
+    alice = prof.snapshot_current()
     alice.save()
     assert alice.meta.last_active_at == 0.0
 

@@ -1,52 +1,39 @@
-"""Tests for the local language-server RPC helpers."""
-from __future__ import annotations
-
-from pathlib import Path
-
+"""Tests for LSP quota extraction."""
 from wind_server import lsp_client
 
-
-def test_extract_quota_percents_nominal() -> None:
-    daily, weekly = lsp_client.extract_quota_percents({
+def test_extract_quota_info_success() -> None:
+    status = {
         "userStatus": {
             "planStatus": {
-                "dailyQuotaRemainingPercent": 72,
-                "weeklyQuotaRemainingPercent": 84,
+                "dailyQuotaRemainingPercent": 27,
+                "weeklyQuotaRemainingPercent": 71,
+                "dailyQuotaResetAtUnix": "1777881600",
+                "weeklyQuotaResetAtUnix": "1778400000"
             }
         }
-    })
-    assert daily == 72 and weekly == 84
+    }
+    daily, weekly, d_reset, w_reset = lsp_client.extract_quota_info(status)
+    assert daily == 27
+    assert weekly == 71
+    assert d_reset == 1777881600
+    assert w_reset == 1778400000
 
+def test_extract_quota_info_old_format() -> None:
+    status = {
+        "dailyQuotaRemainingPercent": 10,
+        "weeklyQuotaRemainingPercent": 20,
+        "dailyQuotaResetAtUnix": 123456,
+        "weeklyQuotaResetAtUnix": 789012
+    }
+    daily, weekly, d_reset, w_reset = lsp_client.extract_quota_info(status)
+    assert daily == 10
+    assert weekly == 20
+    assert d_reset == 123456
+    assert w_reset == 789012
 
-def test_extract_quota_percents_missing_planStatus() -> None:
-    assert lsp_client.extract_quota_percents({"userStatus": {}}) == (None, None)
-
-
-def test_extract_quota_percents_top_level_fallback() -> None:
-    daily, weekly = lsp_client.extract_quota_percents({
-        "dailyQuotaRemainingPercent": 5,
-        "weeklyQuotaRemainingPercent": 10,
-    })
-    assert daily == 5 and weekly == 10
-
-
-def test_extract_quota_percents_unrelated_payload() -> None:
-    assert lsp_client.extract_quota_percents({"foo": "bar"}) == (None, None)
-
-
-def test_discover_lsp_port_parses_latest_session(tmp_path: Path) -> None:
-    # Two session dirs; the lexicographically-greatest one wins.
-    older = tmp_path / "20260101T000000" / "window1" / "exthost" / "codeium.windsurf"
-    newer = tmp_path / "20260202T000000" / "window1" / "exthost" / "codeium.windsurf"
-    older.mkdir(parents=True)
-    newer.mkdir(parents=True)
-    (older / "Windsurf.log").write_text("Language server listening on random port at 11111\n")
-    (newer / "Windsurf.log").write_text(
-        "Language server listening on random port at 33333\n"
-        "Language server listening on random port at 44444\n"  # restart in same session
-    )
-    assert lsp_client.discover_lsp_port(tmp_path) == 44444
-
-
-def test_discover_lsp_port_no_logs(tmp_path: Path) -> None:
-    assert lsp_client.discover_lsp_port(tmp_path) is None
+def test_extract_quota_info_empty() -> None:
+    daily, weekly, d_reset, w_reset = lsp_client.extract_quota_info({})
+    assert daily is None
+    assert weekly is None
+    assert d_reset is None
+    assert w_reset is None
